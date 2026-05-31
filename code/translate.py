@@ -10,11 +10,18 @@ from functools import partial
 from typing import List, Optional
 from openai import OpenAI  
 
-# Initialize the OpenAI client
-openai_client = OpenAI(
-    api_key=API_SECRET_KEY,
-    base_url=BASE_URL
-)
+openai_client = None
+
+
+def get_openai_client():
+    global openai_client
+    if openai_client is None:
+        kwargs = {"api_key": API_SECRET_KEY or os.getenv("OPENAI_API_KEY", "EMPTY")}
+        base_url = BASE_URL or os.getenv("OPENAI_BASE_URL", "")
+        if base_url:
+            kwargs["base_url"] = base_url
+        openai_client = OpenAI(**kwargs)
+    return openai_client
 
 
 def preprocess_and_segment_text(classical_text: str, max_segment_length: int = 2000) -> List[str]:
@@ -109,7 +116,7 @@ def translate_single_segment(
     try:
         if model_type == "api":
 
-            response = openai_client.chat.completions.create(
+            response = get_openai_client().chat.completions.create(
                 model=model_name,
                 messages=[
                     {"role": "system", "content": "You are a professional translator"},

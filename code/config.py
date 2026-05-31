@@ -7,5 +7,5 @@ LOCAL_MODEL_PATH = ""  # Local path for the HuggingFace model
 DEVICE = "cuda"  # Device to run the model on
 
 # Ollama configuration
-BASE_URL_ollama = ""  # Base URL for the Ollama API
-OLLAMA_MODEL = "llama3:8b"  # Default Ollama model
+BASE_URL_ollama = "http://localhost:11434/v1"  # OpenAI-compatible Ollama API
+OLLAMA_MODEL = "qwen3:14b"  # Default local/free model; use qwen3:8b if memory is tight

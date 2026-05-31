@@ -7,11 +7,18 @@ import requests
 import json
 import os
 
-# Initialize the OpenAI client
-openai_client = OpenAI(
-    api_key= "",
-    base_url=""
-)
+openai_client = None
+
+
+def get_openai_client():
+    global openai_client
+    if openai_client is None:
+        kwargs = {"api_key": os.getenv("OPENAI_API_KEY", "EMPTY")}
+        base_url = os.getenv("OPENAI_BASE_URL", "")
+        if base_url:
+            kwargs["base_url"] = base_url
+        openai_client = OpenAI(**kwargs)
+    return openai_client
 
 
 pipeline_cache = {}
@@ -21,7 +28,15 @@ def get_gpt_pipeline(text, model_id, max_tokens, retries=3, delay=3, model_type=
     for attempt in range(retries):
         try:
             if model_type == "ollama":
-                endpoint = f"{BASE_URL_ollama}/chat/completions"
+                base_url = (
+                    BASE_URL_ollama
+                    or os.getenv("OLLAMA_OPENAI_BASE_URL")
+                    or os.getenv("OLLAMA_BASE_URL")
+                    or "http://localhost:11434/v1"
+                ).rstrip("/")
+                if not base_url.endswith("/v1"):
+                    base_url = f"{base_url}/v1"
+                endpoint = f"{base_url}/chat/completions"
                 headers = {
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer ollama"
@@ -49,7 +64,7 @@ def get_gpt_pipeline(text, model_id, max_tokens, retries=3, delay=3, model_type=
                 return response_data['choices'][0]['message']['content']
                 
             else:
-                response = openai_client.chat.completions.create(
+                response = get_openai_client().chat.completions.create(
                     model=model_id,
                     messages=[
                         {"role": "system", "content": "You are a helpful brainstorming assistant."},
