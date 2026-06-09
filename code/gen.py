@@ -21,10 +21,12 @@ HF_CACHE = {}
 
 GENERATOR_BACKEND = "api"
 GENERATOR_MODEL = "deepseek-chat"
+GENERATOR_ADAPTER_PATH = ""
 GENERATOR_BASE_URL = ""
 GENERATOR_API_KEY = ""
 TARGET_BACKEND = "api"
 TARGET_MODEL = "gpt-4o"
+TARGET_ADAPTER_PATH = ""
 TARGET_BASE_URL = ""
 TARGET_API_KEY = ""
 TRANSLATION_BACKEND = "api"
@@ -219,9 +221,10 @@ def chat_with_ollama(model, system_prompt, user_prompt, max_tokens, base_url="")
     return response.json()["choices"][0]["message"]["content"]
 
 
-def load_hf_chat_model(model_id):
-    if model_id in HF_CACHE:
-        return HF_CACHE[model_id]
+def load_hf_chat_model(model_id, adapter_path=""):
+    cache_key = (model_id, adapter_path or "", USE_4BIT)
+    if cache_key in HF_CACHE:
+        return HF_CACHE[cache_key]
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -245,15 +248,20 @@ def load_hf_chat_model(model_id):
         load_kwargs["torch_dtype"] = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
     model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+    if adapter_path:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, adapter_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    model.config.pad_token_id = tokenizer.pad_token_id
     model.eval()
-    HF_CACHE[model_id] = (tokenizer, model)
+    HF_CACHE[cache_key] = (tokenizer, model)
     return tokenizer, model
 
 
-def chat_with_hf(model_id, system_prompt, user_prompt, max_tokens):
-    tokenizer, model = load_hf_chat_model(model_id)
+def chat_with_hf(model_id, system_prompt, user_prompt, max_tokens, adapter_path=""):
+    tokenizer, model = load_hf_chat_model(model_id, adapter_path)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -278,11 +286,20 @@ def chat_with_hf(model_id, system_prompt, user_prompt, max_tokens):
     return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
-def chat_completion(backend, model, system_prompt, user_prompt, max_tokens, base_url="", api_key=""):
+def chat_completion(
+    backend,
+    model,
+    system_prompt,
+    user_prompt,
+    max_tokens,
+    base_url="",
+    api_key="",
+    adapter_path="",
+):
     if backend == "ollama":
         return chat_with_ollama(model, system_prompt, user_prompt, max_tokens, base_url)
     if backend == "hf":
-        return chat_with_hf(model, system_prompt, user_prompt, max_tokens)
+        return chat_with_hf(model, system_prompt, user_prompt, max_tokens, adapter_path)
     if backend == "api":
         client = openai_client_for(base_url, api_key)
         response = client.chat.completions.create(
@@ -386,6 +403,7 @@ def generate_with_fruitfly(intention: str, original_query: str, fly: dict):
             max_tokens=1000,
             base_url=GENERATOR_BASE_URL,
             api_key=GENERATOR_API_KEY,
+            adapter_path=GENERATOR_ADAPTER_PATH,
         )
         generation = generation.strip()
         normalized_generation = generation.replace('：', ':')
@@ -418,6 +436,7 @@ def evaluate_query(intention, query, original_query,counter=None):
             max_tokens=4096,
             base_url=TARGET_BASE_URL,
             api_key=TARGET_API_KEY,
+            adapter_path=TARGET_ADAPTER_PATH,
         )
 
         
@@ -467,6 +486,47 @@ def get_jsonl_prompts(file_name):
 def get_csv_prompts(file_name):
     df = pd.read_csv(file_name)
     return df['goal'].tolist(), df['intention'].tolist()
+
+
+def load_existing_records(record_path):
+    records_by_id = {}
+    duplicate_ids = set()
+    if not record_path.exists():
+        return records_by_id, duplicate_ids
+
+    with open(record_path, "r", encoding="utf-8") as file:
+        for line_no, line in enumerate(file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                record_id = int(record["id"])
+            except Exception as exc:
+                print(f"Skipping invalid record line {line_no} in {record_path}: {exc}")
+                continue
+            if record_id in records_by_id:
+                duplicate_ids.add(record_id)
+            records_by_id[record_id] = record
+    return records_by_id, duplicate_ids
+
+
+def rebuild_adv_prompt_file_from_records(record_path, adv_prompt_path, expected_total):
+    records_by_id, _ = load_existing_records(record_path)
+    ordered_ids = [idx for idx in range(expected_total) if idx in records_by_id]
+
+    with open(adv_prompt_path, "w", encoding="utf-8") as file:
+        for idx in ordered_ids:
+            file.write(
+                json.dumps(
+                    {"prompt": records_by_id[idx]["adversarial_prompt"]},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    return len(ordered_ids)
+
 
 def fruit_fly_optimization(intention, original_query, population_size=10, max_iter=5):
 
@@ -562,7 +622,6 @@ def fruit_fly_optimization(intention, original_query, population_size=10, max_it
         for fly in next_population:
             print("Evaluating fly:", fly)
             score, query, response, consistency, raw = evaluate_fly(fly, intention, original_query, counter)
-            response_text = response
             print("Score:", score)
             print("Query:", query)
             if score > best_score:
@@ -614,12 +673,19 @@ def parse_args():
     parser.add_argument('--adv_prompt_file', type=str, default='adv_prompt.jsonl')
     parser.add_argument('--record_file', type=str, default='record.jsonl')
     parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument(
+        '--resume_missing',
+        action='store_true',
+        help='Keep existing record.jsonl rows and generate only missing ids up to --limit.',
+    )
     parser.add_argument('--generator_backend', choices=['api', 'ollama', 'hf'], default='api')
     parser.add_argument('--generator_model', type=str, default=None)
+    parser.add_argument('--generator_adapter_path', type=str, default='')
     parser.add_argument('--generator_base_url', type=str, default='')
     parser.add_argument('--generator_api_key', type=str, default='')
     parser.add_argument('--target_backend', choices=['api', 'ollama', 'hf'], default='api')
     parser.add_argument('--target_model', type=str, default=None)
+    parser.add_argument('--target_adapter_path', type=str, default='')
     parser.add_argument('--target_base_url', type=str, default='')
     parser.add_argument('--target_api_key', type=str, default='')
     parser.add_argument('--translation_backend', choices=['api', 'ollama', 'none'], default='api')
@@ -631,8 +697,10 @@ def parse_args():
 
 
 def configure_backends(args, prompt_language):
-    global GENERATOR_BACKEND, GENERATOR_MODEL, GENERATOR_BASE_URL, GENERATOR_API_KEY
-    global TARGET_BACKEND, TARGET_MODEL, TARGET_BASE_URL, TARGET_API_KEY
+    global GENERATOR_BACKEND, GENERATOR_MODEL, GENERATOR_ADAPTER_PATH
+    global GENERATOR_BASE_URL, GENERATOR_API_KEY
+    global TARGET_BACKEND, TARGET_MODEL, TARGET_ADAPTER_PATH
+    global TARGET_BASE_URL, TARGET_API_KEY
     global TRANSLATION_BACKEND, TRANSLATION_MODEL, JUDGE_BACKEND, JUDGE_MODEL
     global PROMPT_LANGUAGE, USE_4BIT
 
@@ -640,10 +708,12 @@ def configure_backends(args, prompt_language):
     USE_4BIT = args.use_4bit
     GENERATOR_BACKEND = args.generator_backend
     GENERATOR_MODEL = args.generator_model or (OLLAMA_MODEL if args.generator_backend == 'ollama' else 'deepseek-chat')
+    GENERATOR_ADAPTER_PATH = args.generator_adapter_path
     GENERATOR_BASE_URL = args.generator_base_url
     GENERATOR_API_KEY = args.generator_api_key
     TARGET_BACKEND = args.target_backend
     TARGET_MODEL = args.target_model or (OLLAMA_MODEL if args.target_backend == 'ollama' else 'gpt-4o')
+    TARGET_ADAPTER_PATH = args.target_adapter_path
     TARGET_BASE_URL = args.target_base_url
     TARGET_API_KEY = args.target_api_key
     TRANSLATION_BACKEND = args.translation_backend
@@ -674,13 +744,42 @@ def run_generation(args, prompt_language="classical"):
     output_dir.mkdir(parents=True, exist_ok=True)
     adv_prompt_path = output_dir / args.adv_prompt_file
     record_path = output_dir / args.record_file
+    if args.overwrite and args.resume_missing:
+        raise ValueError("--overwrite and --resume_missing cannot be used together.")
+
+    existing_records = {}
+    duplicate_ids = set()
+    if args.resume_missing:
+        existing_records, duplicate_ids = load_existing_records(record_path)
+        if duplicate_ids:
+            print(f"Warning: duplicate ids found in {record_path}: {sorted(duplicate_ids)}")
+        completed_ids = {
+            idx for idx in existing_records
+            if 0 <= idx < len(prompts)
+        }
+        work_items = [
+            (idx, prompt, intention)
+            for idx, (prompt, intention) in enumerate(zip(prompts, intentions))
+            if idx not in completed_ids
+        ]
+        print(
+            f"Resume mode: found {len(completed_ids)}/{len(prompts)} existing records; "
+            f"generating {len(work_items)} missing records."
+        )
+    else:
+        work_items = list(enumerate(zip(prompts, intentions)))
+
     file_mode = 'w' if args.overwrite else 'a'
 
     with open(adv_prompt_path, file_mode, encoding='utf-8') as file, open(
         record_path, file_mode, encoding='utf-8'
     ) as file_record:
-        for idx, (prompt, intention) in tqdm(enumerate(zip(prompts, intentions)),
-                                             total=len(prompts)):
+        for item in tqdm(work_items, total=len(work_items)):
+            if args.resume_missing:
+                idx, prompt, intention = item
+            else:
+                idx, (prompt, intention) = item
+
             best_query, best_score, jailbreak_attempts, response, consistency, raw = fruit_fly_optimization(
                 intention, prompt, args.population_size, args.max_iter
             )
@@ -705,18 +804,42 @@ def run_generation(args, prompt_language="classical"):
                 "prompt_language": prompt_language,
                 "generator_backend": GENERATOR_BACKEND,
                 "generator_model": GENERATOR_MODEL,
+                "generator_adapter_path": GENERATOR_ADAPTER_PATH,
                 "target_backend": TARGET_BACKEND,
                 "target_model": TARGET_MODEL,
+                "target_adapter_path": TARGET_ADAPTER_PATH,
                 "judge_backend": JUDGE_BACKEND,
                 "judge_model": JUDGE_MODEL,
             }
             file_record.write(json.dumps(record_data, ensure_ascii=False) + "\n")
             file.write(json.dumps({"prompt": best_query}, ensure_ascii=False) + "\n")
 
-    print(f"Total number of success: {success_num}")
-    print(f"Total jailbreak attempts: {total_jailbreak_attempts}")
-    print(f"Average number of jailbreak attempts per prompt: {total_jailbreak_attempts/len(prompts):.2f}")
-    print(f"ASR: {success_num}/{len(prompts)} ({success_num/len(prompts)*100:.1f}%)")
+    if args.resume_missing:
+        rebuilt_count = rebuild_adv_prompt_file_from_records(
+            record_path,
+            adv_prompt_path,
+            len(prompts),
+        )
+        final_records, _ = load_existing_records(record_path)
+        valid_records = [
+            final_records[idx]
+            for idx in range(len(prompts))
+            if idx in final_records
+        ]
+        final_success = sum(1 for record in valid_records if record.get("success") == 1)
+        print(f"Rebuilt {adv_prompt_path} from {rebuilt_count} records sorted by id.")
+        print(f"Newly generated records: {len(work_items)}")
+        print(f"New successful records: {success_num}")
+        print(f"Final completed records: {len(valid_records)}/{len(prompts)}")
+        print(
+            f"Final optimizer ASR: {final_success}/{len(valid_records)} "
+            f"({final_success/max(1, len(valid_records))*100:.1f}%)"
+        )
+    else:
+        print(f"Total number of success: {success_num}")
+        print(f"Total jailbreak attempts: {total_jailbreak_attempts}")
+        print(f"Average number of jailbreak attempts per prompt: {total_jailbreak_attempts/len(prompts):.2f}")
+        print(f"ASR: {success_num}/{len(prompts)} ({success_num/len(prompts)*100:.1f}%)")
     print(f"Saved prompts to: {adv_prompt_path}")
     print(f"Saved records to: {record_path}")
 

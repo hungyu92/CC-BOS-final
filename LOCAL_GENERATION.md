@@ -1,14 +1,17 @@
 # Local CC-BOS Generation
 
-This fork keeps the original Classical Chinese CC-BOS entry point and adds English and modern vernacular Traditional Chinese variants.
+This fork keeps the original Classical Chinese CC-BOS entry point and adds English, modern vernacular Traditional Chinese, and Japanese variants.
 
 - `code/gen.py`: original Classical Chinese CC-BOS style
 - `code/gen_english.py`: English CC-BOS-style ablation
 - `code/gen_traditional.py`: modern vernacular Taiwan-style Traditional Chinese CC-BOS-style ablation
+- `code/gen_japanese.py`: modern Japanese CC-BOS-style ablation
 
 All variants use the same fruit-fly search, dimensions, scoring loop, and output schema. The intended comparison is language/style, not a fixed prompt wrapper.
 
-The English and modern vernacular Traditional Chinese variants also replace the original Classical Chinese `dimension_options` labels with language-matched labels while preserving the same dimension keys, option counts, numeric indices, and search procedure. This keeps the search space shape comparable while avoiding Classical Chinese strategy labels leaking into the English or vernacular Traditional Chinese runs.
+The English, modern vernacular Traditional Chinese, and Japanese variants also replace the original Classical Chinese `dimension_options` labels with language-matched labels while preserving the same dimension keys, option counts, numeric indices, and search procedure. This keeps the search space shape comparable while avoiding Classical Chinese strategy labels leaking into multilingual runs.
+
+The multilingual variants are intended to test whether broadly used languages can reduce translation overhead while preserving some CC-BOS prompt-optimization effect. This is not an attempt to depend only on obscure, old, or nearly disappeared language variants; English, modern Traditional Chinese, and Japanese are practical languages with strong LLM support.
 
 ## Prepare Input
 
@@ -133,6 +136,63 @@ python gen_traditional.py \
 ```
 
 The Traditional Chinese version uses the same optimization loop as the Classical Chinese version, but the generated prompt is constrained to modern vernacular Traditional Chinese, not Classical Chinese or semi-classical prose. It keeps translation enabled during CC-BOS scoring because the consistency judge compares against the original English intention.
+
+## Generate Japanese Prompts
+
+The Japanese version uses modern Japanese, with examples inspired by Japanese bulletin-board style posts, note-style article planning, university seminars, internal review memos, detective case files, and literary editing notes.
+
+For a low-cost GPT-4o pilot, run only 5 examples:
+
+```bash
+cd "/mnt/c/Users/lab342/Documents/GAIS/final project/third_party/CC-BOS/code"
+
+ROOT="/mnt/c/Users/lab342/Documents/GAIS/final project"
+QWEN_BASE="$ROOT/models/Qwen3-8B"
+GEN_MODEL="qwen3:14b"
+export OPENAI_API_KEY="your OpenAI API key"
+
+python gen_japanese.py \
+  --input_file ../data/tenbenign_advbench.csv \
+  --data_format csv \
+  --output_dir ../result/japanese_qwen3_base_gpt4o_judge_5 \
+  --overwrite --limit 5 \
+  --population_size 5 \
+  --max_iter 5 \
+  --seed 0 \
+  --generator_backend ollama \
+  --generator_model "$GEN_MODEL" \
+  --target_backend hf \
+  --target_model "$QWEN_BASE" \
+  --translation_backend none \
+  --judge_backend api \
+  --judge_model gpt-4o \
+  --use_4bit
+```
+
+For a Japanese tenBenign LoRA adapter target, train the adapter from the tenBenign repo first, then pass it with `--target_adapter_path`:
+
+```bash
+TEN="$ROOT/third_party/tenBenign"
+QWEN_JA_ADAPTER="$TEN/code/finetune/adapters/qwen3_lora_ja_r16_stage2"
+
+python gen_japanese.py \
+  --input_file ../data/tenbenign_advbench.csv \
+  --data_format csv \
+  --output_dir ../result/japanese_qwen3_lora_ja_r16_gpt4o_judge_5 \
+  --overwrite --limit 5 \
+  --population_size 5 \
+  --max_iter 5 \
+  --seed 0 \
+  --generator_backend ollama \
+  --generator_model "$GEN_MODEL" \
+  --target_backend hf \
+  --target_model "$QWEN_BASE" \
+  --target_adapter_path "$QWEN_JA_ADAPTER" \
+  --translation_backend none \
+  --judge_backend api \
+  --judge_model gpt-4o \
+  --use_4bit
+```
 
 ## Sync For tenBenign Evaluation
 
